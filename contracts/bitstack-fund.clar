@@ -64,3 +64,73 @@
         min-contribution: uint,
     }
 )
+
+;; Contribution Tracking
+(define-map contributions
+    {
+        campaign-id: uint,
+        contributor: principal,
+    }
+    {
+        amount: uint,
+        refunded: bool,
+        voting-power: uint,
+    }
+)
+
+;; Voting Records
+(define-map contributor-votes
+    {
+        campaign-id: uint,
+        voter: principal,
+    }
+    {
+        voted: bool,
+        vote-for: bool,
+    }
+)
+
+;; Campaign Contributors List
+(define-map campaign-contributors
+    { campaign-id: uint }
+    { contributor-list: (list 500 principal) }
+)
+
+;; Read-only Functions
+
+;; Get campaign details by ID
+(define-read-only (get-campaign (campaign-id uint))
+    (map-get? campaigns { campaign-id: campaign-id })
+)
+
+;; Get contribution details for a specific campaign and contributor
+(define-read-only (get-contribution
+        (campaign-id uint)
+        (contributor principal)
+    )
+    (map-get? contributions {
+        campaign-id: campaign-id,
+        contributor: contributor,
+    })
+)
+
+;; Get total number of campaigns created
+(define-read-only (get-campaign-count)
+    (var-get campaign-counter)
+)
+
+;; Get current platform fee rate
+(define-read-only (get-platform-fee-rate)
+    (var-get platform-fee-rate)
+)
+
+;; Check if a campaign is still active
+(define-read-only (is-campaign-active (campaign-id uint))
+    (match (get-campaign campaign-id)
+        campaign (and
+            (is-eq (get status campaign) STATUS_ACTIVE)
+            (< stacks-block-height (get deadline-height campaign))
+        )
+        false
+    )
+)
