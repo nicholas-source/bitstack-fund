@@ -31,12 +31,19 @@
 (define-constant ERR_ALREADY_VOTED (err u110))
 (define-constant ERR_INSUFFICIENT_VOTING_POWER (err u111))
 (define-constant ERR_CONTRIBUTOR_LIST_FULL (err u112))
+(define-constant ERR_INVALID_STRING (err u113))
 
 ;; Campaign Status Codes
 (define-constant STATUS_ACTIVE u1)
 (define-constant STATUS_SUCCESSFUL u2)
 (define-constant STATUS_FAILED u3)
 (define-constant STATUS_CANCELLED u4)
+
+;; Validation Constants
+(define-constant MAX_DURATION_BLOCKS u144000) ;; ~100 days at 10 min blocks
+(define-constant MAX_VOTING_DURATION_BLOCKS u14400) ;; ~10 days
+(define-constant MIN_DURATION_BLOCKS u144) ;; ~1 day
+(define-constant MAX_CAMPAIGN_ID u1000000) ;; Reasonable upper bound
 
 ;; Data Variables
 
@@ -161,6 +168,27 @@
 
 ;; Private Functions
 
+;; Validate string input to prevent malicious content
+(define-private (is-valid-string (input (string-ascii 256)))
+    (let ((length (len input)))
+        (and
+            (> length u0)
+            (<= length u256)
+            ;; Add additional validation if needed
+            ;; For now, just check non-empty and reasonable length
+            true
+        )
+    )
+)
+
+;; Validate campaign ID is within reasonable bounds
+(define-private (is-valid-campaign-id (campaign-id uint))
+    (and
+        (> campaign-id u0)
+        (<= campaign-id MAX_CAMPAIGN_ID)
+    )
+)
+
 ;; Add a contributor to the campaign's contributor list
 (define-private (add-contributor-to-list
         (campaign-id uint)
@@ -219,17 +247,30 @@
     (let (
             (campaign-id (+ (var-get campaign-counter) u1))
             (deadline-height (+ stacks-block-height duration-blocks))
+            (validated-voting-duration (if voting-enabled
+                (begin
+                    (asserts! (<= voting-duration-blocks MAX_VOTING_DURATION_BLOCKS) ERR_INVALID_PARAMETERS)
+                    voting-duration-blocks
+                )
+                u0
+            ))
             (voting-deadline (if voting-enabled
-                (+ deadline-height voting-duration-blocks)
+                (+ deadline-height validated-voting-duration)
                 deadline-height
             ))
         )
+        ;; Input validation
+        (asserts! (is-valid-string (unwrap! (as-max-len? title u64) ERR_INVALID_STRING)) ERR_INVALID_STRING)
+        (asserts! (is-valid-string description) ERR_INVALID_STRING)
         (asserts! (> goal u0) ERR_INVALID_PARAMETERS)
-        (asserts! (> duration-blocks u0) ERR_INVALID_PARAMETERS)
+        (asserts! (>= duration-blocks MIN_DURATION_BLOCKS) ERR_INVALID_PARAMETERS)
+        (asserts! (<= duration-blocks MAX_DURATION_BLOCKS) ERR_INVALID_PARAMETERS)
         (asserts! (> min-contribution u0) ERR_INVALID_PARAMETERS)
+        
+        ;; Store the validated inputs
         (map-set campaigns { campaign-id: campaign-id } {
             creator: tx-sender,
-            title: title,
+            title: (unwrap! (as-max-len? title u64) ERR_INVALID_STRING),
             description: description,
             goal: goal,
             raised: u0,
@@ -267,10 +308,14 @@
                 u0
             ))
         )
+        ;; Input validation
+        (asserts! (is-valid-campaign-id campaign-id) ERR_INVALID_PARAMETERS)
         (asserts! (is-campaign-active campaign-id) ERR_CAMPAIGN_ENDED)
         (asserts! (>= amount (get min-contribution campaign)) ERR_INVALID_AMOUNT)
+        
         ;; Transfer STX to contract
         (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        
         ;; Update contribution
         (map-set contributions {
             campaign-id: campaign-id,
@@ -280,10 +325,12 @@
             refunded: false,
             voting-power: (+ (get voting-power existing-contribution) voting-power),
         })
+        
         ;; Update campaign raised amount
         (map-set campaigns { campaign-id: campaign-id }
             (merge campaign { raised: (+ (get raised campaign) amount) })
         )
+        
         ;; Add contributor to list
         (try! (add-contributor-to-list campaign-id tx-sender))
         (ok true)
@@ -297,12 +344,16 @@
             (platform-fee (calculate-platform-fee (get raised campaign)))
             (creator-amount (- (get raised campaign) platform-fee))
         )
+        ;; Input validation
+        (asserts! (is-valid-campaign-id campaign-id) ERR_INVALID_PARAMETERS)
+        
         (update-campaign-status campaign-id)
         (asserts! (is-eq (get creator campaign) tx-sender) ERR_UNAUTHORIZED)
         (asserts! (>= stacks-block-height (get deadline-height campaign))
             ERR_CAMPAIGN_ACTIVE
         )
         (asserts! (is-campaign-successful campaign-id) ERR_GOAL_NOT_MET)
+        
         ;; Handle voting if enabled
         (if (get voting-enabled campaign)
             (begin
@@ -317,8 +368,10 @@
             )
             true
         )
+        
         ;; Transfer funds to creator (minus platform fee)
         (try! (as-contract (stx-transfer? creator-amount tx-sender (get creator campaign))))
+        
         ;; Transfer platform fee to contract owner
         (if (> platform-fee u0)
             (try! (as-contract (stx-transfer? platform-fee tx-sender CONTRACT_OWNER)))
@@ -334,12 +387,16 @@
             (campaign (unwrap! (get-campaign campaign-id) ERR_CAMPAIGN_NOT_FOUND))
             (contribution (unwrap! (get-contribution campaign-id tx-sender) ERR_NO_CONTRIBUTION))
         )
+        ;; Input validation
+        (asserts! (is-valid-campaign-id campaign-id) ERR_INVALID_PARAMETERS)
+        
         (update-campaign-status campaign-id)
         (asserts! (not (get refunded contribution)) ERR_ALREADY_REFUNDED)
         (asserts! (>= stacks-block-height (get deadline-height campaign))
             ERR_CAMPAIGN_ACTIVE
         )
         (asserts! (not (is-campaign-successful campaign-id)) ERR_GOAL_NOT_MET)
+        
         ;; Mark as refunded
         (map-set contributions {
             campaign-id: campaign-id,
@@ -347,6 +404,7 @@
         }
             (merge contribution { refunded: true })
         )
+        
         ;; Transfer refund
         (try! (as-contract (stx-transfer? (get amount contribution) tx-sender tx-sender)))
         (ok true)
@@ -366,6 +424,9 @@
                 voter: tx-sender,
             }))
         )
+        ;; Input validation
+        (asserts! (is-valid-campaign-id campaign-id) ERR_INVALID_PARAMETERS)
+        
         (asserts! (get voting-enabled campaign) ERR_UNAUTHORIZED)
         (asserts! (>= stacks-block-height (get deadline-height campaign))
             ERR_CAMPAIGN_ACTIVE
@@ -377,6 +438,7 @@
         (asserts! (> (get voting-power contribution) u0)
             ERR_INSUFFICIENT_VOTING_POWER
         )
+        
         ;; Record vote
         (map-set contributor-votes {
             campaign-id: campaign-id,
@@ -385,6 +447,7 @@
             voted: true,
             vote-for: vote-for,
         })
+        
         ;; Update vote counts
         (if vote-for
             (map-set campaigns { campaign-id: campaign-id }
@@ -401,8 +464,12 @@
 ;; Cancel an active campaign (creator only)
 (define-public (cancel-campaign (campaign-id uint))
     (let ((campaign (unwrap! (get-campaign campaign-id) ERR_CAMPAIGN_NOT_FOUND)))
+        ;; Input validation
+        (asserts! (is-valid-campaign-id campaign-id) ERR_INVALID_PARAMETERS)
+        
         (asserts! (is-eq (get creator campaign) tx-sender) ERR_UNAUTHORIZED)
         (asserts! (is-eq (get status campaign) STATUS_ACTIVE) ERR_CAMPAIGN_ENDED)
+        
         (map-set campaigns { campaign-id: campaign-id }
             (merge campaign { status: STATUS_CANCELLED })
         )
@@ -425,7 +492,10 @@
 ;; Emergency pause for a campaign (owner only)
 (define-public (emergency-pause-campaign (campaign-id uint))
     (let ((campaign (unwrap! (get-campaign campaign-id) ERR_CAMPAIGN_NOT_FOUND)))
+        ;; Input validation
+        (asserts! (is-valid-campaign-id campaign-id) ERR_INVALID_PARAMETERS)
         (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        
         (map-set campaigns { campaign-id: campaign-id }
             (merge campaign { status: STATUS_CANCELLED })
         )
