@@ -134,3 +134,72 @@
         false
     )
 )
+
+;; Check if a campaign has met its funding goal
+(define-read-only (is-campaign-successful (campaign-id uint))
+    (match (get-campaign campaign-id)
+        campaign (>= (get raised campaign) (get goal campaign))
+        false
+    )
+)
+
+;; Calculate platform fee for a given amount
+(define-read-only (calculate-platform-fee (amount uint))
+    (/ (* amount (var-get platform-fee-rate)) u10000)
+)
+
+;; Get voter status for a specific campaign
+(define-read-only (get-vote-status
+        (campaign-id uint)
+        (voter principal)
+    )
+    (map-get? contributor-votes {
+        campaign-id: campaign-id,
+        voter: voter,
+    })
+)
+
+;; Private Functions
+
+;; Add a contributor to the campaign's contributor list
+(define-private (add-contributor-to-list
+        (campaign-id uint)
+        (contributor principal)
+    )
+    (let ((current-list (default-to (list)
+            (get contributor-list
+                (map-get? campaign-contributors { campaign-id: campaign-id })
+            ))))
+        (if (< (len current-list) u500)
+            (begin
+                (map-set campaign-contributors { campaign-id: campaign-id } { contributor-list: (unwrap! (as-max-len? (append current-list contributor) u500)
+                    ERR_CONTRIBUTOR_LIST_FULL
+                ) }
+                )
+                (ok true)
+            )
+            (ok true)
+        )
+    )
+)
+
+;; Update campaign status based on current blockchain height
+(define-private (update-campaign-status (campaign-id uint))
+    (match (get-campaign campaign-id)
+        campaign (begin
+            (if (>= stacks-block-height (get deadline-height campaign))
+                (if (>= (get raised campaign) (get goal campaign))
+                    (map-set campaigns { campaign-id: campaign-id }
+                        (merge campaign { status: STATUS_SUCCESSFUL })
+                    )
+                    (map-set campaigns { campaign-id: campaign-id }
+                        (merge campaign { status: STATUS_FAILED })
+                    )
+                )
+                true
+            )
+            true
+        )
+        false
+    )
+)
