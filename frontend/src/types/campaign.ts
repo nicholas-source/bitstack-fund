@@ -23,6 +23,7 @@ export enum CampaignStatus {
 }
 
 export interface Contribution {
+  campaignId: number
   amount: number
   refunded: boolean
   votingPower: number
@@ -41,4 +42,10 @@ export interface CreateCampaignData {
   votingEnabled: boolean
   votingDurationBlocks: number
   minContribution: number
+}
+
+export interface User {
+  address: string
+  balance: number
+  isConnected: boolean
 }
